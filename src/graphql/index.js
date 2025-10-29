@@ -1,7 +1,7 @@
-const documentSchema = require('./schemas/document');
-const documentResolvers = require('./resolvers/document');
+const sacramentoSchema = require('./schemas/sacramento');
+const sacramentoResolvers = require('./resolvers/sacramento');
 
 module.exports = {
-  typeDefs: [documentSchema],
-  resolvers: [documentResolvers],
+  typeDefs: [sacramentoSchema],
+  resolvers: [sacramentoResolvers],
 };

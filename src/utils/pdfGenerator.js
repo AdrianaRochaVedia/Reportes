@@ -8,12 +8,12 @@ class PDFGenerator {
   constructor() {
     this.uploadDir = path.join(__dirname, '../Uploads');
     this.colors = {
-      primary: '#2e7d32',
+      primary: '#6a1b9a',      // Púrpura litúrgico
       secondary: '#555',
-      light: '#f1f8e9',
-      border: '#c8e6c9',
-      accent: '#66bb6a',
-      textDark: '#1b5e20'
+      light: '#f3e5f5',        // Lavanda suave
+      border: '#ce93d8',
+      accent: '#ab47bc',
+      textDark: '#4a148c'
     };
     this.fonts = {
       regular: 'Helvetica',
@@ -32,10 +32,19 @@ class PDFGenerator {
     }
   }
 
-  async generatePDFReport(documentos, options = {}, filter = {}) {
-    const fields = options.fields || ['id_documento', 'nombre', 'tipo', 'fuente_origen', 'anio_publicacion', 'aplicacion', 'vistas'];
+  async generatePDFReport(sacramentos, options = {}, filter = {}) {
+    const fields = options.fields || [
+      'id_sacramento', 
+      'fecha_sacramento', 
+      'tipo_sacramento', 
+      'foja', 
+      'numero', 
+      'parroquia',
+      'fecha_registro'
+    ];
+    
     const timestamp = Date.now();
-    const fileName = `reporte_documentos_${timestamp}.pdf`;
+    const fileName = `reporte_sacramentos_${timestamp}.pdf`;
     const filePath = path.join(this.uploadDir, fileName);
     const doc = new PDFDocument({ autoFirstPage: false });
     doc.pipe(fs.createWriteStream(filePath));
@@ -45,8 +54,8 @@ class PDFGenerator {
 
     doc.addPage();
     this._addHeader(doc);
-    this._addFilterInfo(doc, filter, documentos.length);
-    this._addTable(doc, documentos, fields, () => {
+    this._addFilterInfo(doc, filter, sacramentos.length);
+    this._addTable(doc, sacramentos, fields, () => {
       this._addFooter(doc, pageNumber++);
       doc.addPage();
       this._addHeader(doc);
@@ -54,7 +63,8 @@ class PDFGenerator {
 
     this._addFooter(doc, pageNumber++);
 
-    const chartImage = await this._generateChartImage(documentos);
+    // Gráfica de distribución de sacramentos
+    const chartImage = await this._generateChartImage(sacramentos);
     doc.addPage();
     this._addHeader(doc);
     const chartWidth = 500;
@@ -71,7 +81,7 @@ class PDFGenerator {
     return this._createFileInfoPromise(fileName, filePath);
   }
 
-  async _generateChartImage(documentos) {
+  async _generateChartImage(sacramentos) {
     const width = 600;
     const height = 400;
     const chartJSNodeCanvas = new ChartJSNodeCanvas({
@@ -83,14 +93,15 @@ class PDFGenerator {
       }
     });
 
-    const yearCounts = documentos.reduce((acc, doc) => {
-      const year = new Date(doc.anio_publicacion).getFullYear() || 'Desconocido';
-      acc[year] = (acc[year] || 0) + 1;
+    // Contar sacramentos por tipo
+    const tipoCounts = sacramentos.reduce((acc, sac) => {
+      const tipo = sac.tipoSacramento?.nombre || 'Sin tipo';
+      acc[tipo] = (acc[tipo] || 0) + 1;
       return acc;
     }, {});
 
-    const data = Object.values(yearCounts);
-    const labels = Object.keys(yearCounts);
+    const data = Object.values(tipoCounts);
+    const labels = Object.keys(tipoCounts);
     const total = data.reduce((sum, val) => sum + val, 0);
 
     const configuration = {
@@ -98,10 +109,10 @@ class PDFGenerator {
       data: {
         labels,
         datasets: [{
-          label: 'Documentos',
+          label: 'Sacramentos',
           data,
-          backgroundColor: labels.length === 1 ? ['#66bb6a'] : [
-            '#66bb6a', '#42a5f5', '#ffca28', '#ef5350', '#ab47bc', '#26c6da', '#ffa726'
+          backgroundColor: labels.length === 1 ? ['#ab47bc'] : [
+            '#ab47bc', '#42a5f5', '#ffca28', '#ef5350', '#66bb6a', '#26c6da', '#ffa726'
           ]
         }]
       },
@@ -109,7 +120,10 @@ class PDFGenerator {
         plugins: {
           title: {
             display: true,
-            text: 'Distribución de documentos por año'
+            text: 'Distribución de sacramentos por tipo',
+            font: {
+              size: 16
+            }
           },
           legend: {
             display: labels.length > 1,
@@ -117,6 +131,10 @@ class PDFGenerator {
           },
           datalabels: {
             color: '#fff',
+            font: {
+              weight: 'bold',
+              size: 12
+            },
             formatter: (value) => {
               const porcentaje = ((value / total) * 100).toFixed(1);
               return `${porcentaje}%`;
@@ -148,9 +166,13 @@ class PDFGenerator {
   }
 
   _addHeader(doc) {
-    doc.image('./src/assets/miga-24.png', 50, 30, { width: 50 });
+    const logoPath = './src/assets/miga-24.png';
+    if (fs.existsSync(logoPath)) {
+      doc.image(logoPath, 50, 30, { width: 50 });
+    }
+    
     doc.fontSize(22).font(this.fonts.bold).fillColor(this.colors.primary)
-      .text('Reporte de Documentos', 100, 40, { align: 'center' });
+      .text('Reporte de Sacramentos', 100, 40, { align: 'center' });
     doc.fontSize(10).font(this.fonts.italic).fillColor(this.colors.secondary)
       .text(`Generado: ${moment().format('DD/MM/YYYY HH:mm')}`, { align: 'right' });
 
@@ -161,7 +183,7 @@ class PDFGenerator {
   }
 
   _addFilterInfo(doc, filter, total) {
-    doc.rect(50, doc.y, doc.page.width - 100, 70)
+    doc.rect(50, doc.y, doc.page.width - 100, 90)
       .fillColor(this.colors.light).fill();
     const startY = doc.y + 10;
     doc.fontSize(14).font(this.fonts.bold).fillColor(this.colors.primary)
@@ -169,39 +191,55 @@ class PDFGenerator {
     doc.fontSize(10).font(this.fonts.regular).fillColor(this.colors.textDark);
 
     const filtros = [];
-    if (filter.tipo) filtros.push(`Tipo: ${filter.tipo}`);
-    if (filter.anio) filtros.push(`Año: ${filter.anio}`);
+    if (filter.tipo_sacramento_id_tipo) filtros.push(`Tipo de Sacramento: ID ${filter.tipo_sacramento_id_tipo}`);
+    if (filter.foja) filtros.push(`Foja: ${filter.foja}`);
+    if (filter.numero) filtros.push(`Número: ${filter.numero}`);
+    if (filter.institucion_parroquia_id_parroquia) filtros.push(`Parroquia: ID ${filter.institucion_parroquia_id_parroquia}`);
+    if (filter.anio_sacramento) filtros.push(`Año: ${filter.anio_sacramento}`);
+    if (filter.fecha_sacramento_desde) filtros.push(`Desde: ${moment(filter.fecha_sacramento_desde).format('DD/MM/YYYY')}`);
+    if (filter.fecha_sacramento_hasta) filtros.push(`Hasta: ${moment(filter.fecha_sacramento_hasta).format('DD/MM/YYYY')}`);
+    if (filter.search) filtros.push(`Búsqueda: ${filter.search}`);
     if (filter.orderBy) {
       const dir = filter.orderDirection === 'ASC' ? 'Ascendente' : 'Descendente';
       filtros.push(`Orden: ${filter.orderBy} (${dir})`);
     }
 
-    doc.text(filtros.length ? filtros.join(' | ') : 'Sin filtros aplicados', { align: 'left' });
-    doc.moveDown(0.5);
+    if (filtros.length > 0) {
+      filtros.forEach((filtro, idx) => {
+        if (idx > 0) doc.moveDown(0.3);
+        doc.text(`• ${filtro}`, 60, doc.y, { align: 'left' });
+      });
+    } else {
+      doc.text('Sin filtros aplicados', 60, doc.y, { align: 'left' });
+    }
+    
+    doc.moveDown(0.8);
     doc.font(this.fonts.bold).fillColor(this.colors.accent)
-      .text(`Total de documentos encontrados: ${total}`);
+      .text(`Total de sacramentos encontrados: ${total}`, 60);
     doc.moveDown(2);
   }
 
-  _addTable(doc, documentos, fields, onNewPage) {
+  _addTable(doc, sacramentos, fields, onNewPage) {
     const columnTitles = {
-      id_documento: 'ID',
-      nombre: 'Nombre',
-      tipo: 'Tipo',
-      fuente_origen: 'Fuente',
-      anio_publicacion: 'Año',
-      aplicacion: 'Aplicación',
-      vistas: 'Vistas'
+      id_sacramento: 'ID',
+      fecha_sacramento: 'Fecha',
+      tipo_sacramento: 'Tipo',
+      foja: 'Foja',
+      numero: 'Nº',
+      parroquia: 'Parroquia',
+      usuario: 'Registrado por',
+      fecha_registro: 'F. Registro'
     };
 
     const columnWidths = {
-      id_documento: 40,      
-      nombre: 100,           
-      tipo: 65,             
-      fuente_origen: 100,    
-      anio_publicacion: 30, 
-      aplicacion: 60,       
-      vistas: 40           
+      id_sacramento: 35,
+      fecha_sacramento: 70,
+      tipo_sacramento: 80,
+      foja: 45,
+      numero: 35,
+      parroquia: 100,
+      usuario: 90,
+      fecha_registro: 70
     };
 
     const startX = 50;
@@ -244,18 +282,13 @@ class PDFGenerator {
     drawHeader();
     doc.font(this.fonts.regular).fontSize(9).fillColor(this.colors.textDark);
 
-    documentos.forEach((d, idx) => {
+    sacramentos.forEach((sacramento, idx) => {
       let maxLines = 1;
       let needsMultipleLines = false;
       
       fields.forEach((field) => {
         const colWidth = adjustedWidths[field];
-        let val = d[field] != null ? d[field].toString() : '';
-        
-        if (field === 'anio_publicacion') {
-          const date = new Date(val);
-          if (!isNaN(date)) val = date.getUTCFullYear().toString();
-        }
+        let val = this._getFieldValue(sacramento, field);
         
         const availableTextWidth = colWidth - 6;
         const words = val.split(' ');
@@ -298,17 +331,12 @@ class PDFGenerator {
       let currentX = startX;
       fields.forEach((field) => {
         const colWidth = adjustedWidths[field];
-        let val = d[field] != null ? d[field].toString() : '';
-        if (field === 'anio_publicacion') {
-          const date = new Date(val);
-          if (!isNaN(date)) val = date.getUTCFullYear().toString();
-        }
-        let align = 'left';
+        let val = this._getFieldValue(sacramento, field);
         
         doc.fillColor(this.colors.textDark).text(val, currentX + 3, y + 5, {
           width: colWidth - 6,
           height: rowHeight - 10,
-          align: align,
+          align: 'left',
           ellipsis: false,
           lineBreak: true
         });
@@ -320,8 +348,45 @@ class PDFGenerator {
     });
   }
 
+  _getFieldValue(sacramento, field) {
+    let val = '';
+    
+    switch(field) {
+      case 'id_sacramento':
+        val = sacramento.id_sacramento?.toString() || '';
+        break;
+      case 'fecha_sacramento':
+        val = sacramento.fecha_sacramento ? moment(sacramento.fecha_sacramento).format('DD/MM/YYYY') : '';
+        break;
+      case 'tipo_sacramento':
+        val = sacramento.tipoSacramento?.nombre || '';
+        break;
+      case 'foja':
+        val = sacramento.foja || '';
+        break;
+      case 'numero':
+        val = sacramento.numero?.toString() || '';
+        break;
+      case 'parroquia':
+        val = sacramento.parroquia?.nombre || '';
+        break;
+      case 'usuario':
+        if (sacramento.usuario) {
+          val = `${sacramento.usuario.nombre || ''} ${sacramento.usuario.apellido_paterno || ''}`.trim();
+        }
+        break;
+      case 'fecha_registro':
+        val = sacramento.fecha_registro ? moment(sacramento.fecha_registro).format('DD/MM/YYYY HH:mm') : '';
+        break;
+      default:
+        val = sacramento[field]?.toString() || '';
+    }
+    
+    return val;
+  }
+
   _addFooter(doc, pageNumber) {
-    const text = `Sistema de Gestión Documental | Página ${pageNumber}`;
+    const text = `Sistema de Gestión de Sacramentos | Página ${pageNumber}`;
     const fontSize = 8;
     const y = doc.page.height - 30;
 
