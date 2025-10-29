@@ -8,9 +8,9 @@ class PDFGenerator {
   constructor() {
     this.uploadDir = path.join(__dirname, '../Uploads');
     this.colors = {
-      primary: '#6a1b9a',      // Púrpura litúrgico
+      primary: '#6a1b9a',      
       secondary: '#555',
-      light: '#f3e5f5',        // Lavanda suave
+      light: '#f3e5f5',        
       border: '#ce93d8',
       accent: '#ab47bc',
       textDark: '#4a148c'
@@ -63,7 +63,7 @@ class PDFGenerator {
 
     this._addFooter(doc, pageNumber++);
 
-    // Gráfica de distribución de sacramentos
+    // Grafica para ditribucion de sacramentos
     const chartImage = await this._generateChartImage(sacramentos);
     doc.addPage();
     this._addHeader(doc);
