@@ -7,7 +7,15 @@ const { setupDownloadRoutes } = require('./controllers/downloadController');
 async function startServer() {
   const app = express();
 
-  const server = new ApolloServer({ typeDefs, resolvers });
+  const server = new ApolloServer({ 
+    typeDefs, 
+    resolvers,
+
+    context: ({ req }) => {
+      const token = req.headers['x-token'] || '';
+      return { token };
+    },
+  });
 
   //Servidor de GraphQL
   await server.start();
