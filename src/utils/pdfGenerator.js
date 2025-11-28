@@ -8,12 +8,12 @@ class PDFGenerator {
   constructor() {
     this.uploadDir = path.join(__dirname, '../Uploads');
     this.colors = {
-      primary: '#6a1b9a',      
-      secondary: '#555',
-      light: '#f3e5f5',        
-      border: '#ce93d8',
-      accent: '#ab47bc',
-      textDark: '#4a148c'
+      primary: '#1565C0',     
+      secondary: '#424242',    
+      light: '#E3F2FD',        
+      border: '#1976D2',       
+      accent: '#2196F3',      
+      textDark: '#0D47A1'      
     };
     this.fonts = {
       regular: 'Helvetica',
@@ -637,7 +637,7 @@ class PDFGenerator {
   }
 
   _addPortada(doc) {
-    const portadaPath = path.join(__dirname, '../assets/portada.png');
+    const portadaPath = path.join(__dirname, '../assets/portadaof3.png');
     if (fs.existsSync(portadaPath)) {
       doc.addPage({ size: 'A4', margin: 0 });
       doc.image(portadaPath, 0, 0, {
@@ -650,7 +650,7 @@ class PDFGenerator {
   _addHeader(doc, titulo = 'Reporte de Sacramentos') {
     const logoPath = './src/assets/arquidiocesis-24.png';
     if (fs.existsSync(logoPath)) {
-      doc.image(logoPath, 50, 30, { width: 50 });
+      doc.image(logoPath, 50, 30, { width: 70 });
     }
     
     doc.fontSize(22).font(this.fonts.bold).fillColor(this.colors.primary)
