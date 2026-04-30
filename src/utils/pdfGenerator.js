@@ -7,21 +7,25 @@ const { ChartJSNodeCanvas } = require('chartjs-node-canvas');
 class PDFGenerator {
   constructor() {
     this.uploadDir = path.join(__dirname, '../Uploads');
+
     this.colors = {
-      primary: '#1565C0',     
-      secondary: '#424242',    
-      light: '#E3F2FD',        
-      border: '#1976D2',       
-      accent: '#2196F3',      
-      textDark: '#0D47A1'      
+      primary: '#1565C0',
+      secondary: '#424242',
+      light: '#E3F2FD',
+      border: '#1976D2',
+      accent: '#2196F3',
+      textDark: '#0D47A1'
     };
+
     this.fonts = {
       regular: 'Helvetica',
       bold: 'Helvetica-Bold',
       italic: 'Helvetica-Oblique'
     };
+
     this.fileRetentionTime = 3600000;
     this.cleanupInterval = 24 * 60 * 60 * 1000;
+
     this._initializeUploadDirectory();
     this._startCleanupScheduler();
   }
@@ -32,132 +36,177 @@ class PDFGenerator {
     }
   }
 
-  async generatePDFReport(sacramentos, options = {}, filter = {}, estadisticas = null) {
-    const fields = options.fields || [
-      'id_sacramento', 
-      'fecha_sacramento', 
-      'tipo_sacramento', 
-      'foja', 
-      'numero', 
-      'parroquia',
-      'activo',
-      'fecha_registro'
-    ];
-    
-    const timestamp = Date.now();
-    const fileName = `reporte_sacramentos_${timestamp}.pdf`;
-    const filePath = path.join(this.uploadDir, fileName);
-    const doc = new PDFDocument({ autoFirstPage: false });
-    doc.pipe(fs.createWriteStream(filePath));
-
-    let pageNumber = 1;
-    
-    // Portada
-    this._addPortada(doc);
-
-    // Página de información general
-    doc.addPage();
-    this._addHeader(doc, options.titulo);
-    this._addFilterInfo(doc, filter, sacramentos.length);
-    
-    
-    if (options.incluirEstadisticas && estadisticas) {
-      this._addEstadisticasResumen(doc, estadisticas);
-    }
-    
-    this._addFooter(doc, pageNumber++);
-
-    // Tabla de datos
-    doc.addPage();
-    this._addHeader(doc, options.titulo);
-    this._addTable(doc, sacramentos, fields, () => {
-      this._addFooter(doc, pageNumber++);
-      doc.addPage();
-      this._addHeader(doc, options.titulo);
-    });
-    this._addFooter(doc, pageNumber++);
-
-    // Gráfica de distribución por tipo
+  async generatePDFReport(sacramentos = [], options = {}, filter = {}, estadisticas = null) {
     try {
-      const chartImageTipo = await this._generateChartByType(sacramentos);
+      filter = filter || {};
+
+      const fields = options.fields || [
+        'id_sacramento',
+        'fecha_sacramento',
+        'tipo_sacramento',
+        'foja',
+        'numero',
+        'parroquia',
+        'activo',
+        'fecha_registro'
+      ];
+
+      const timestamp = Date.now();
+      const fileName = `reporte_sacramentos_${timestamp}.pdf`;
+      const filePath = path.join(this.uploadDir, fileName);
+
+      const doc = new PDFDocument({ autoFirstPage: false });
+      const writeStream = fs.createWriteStream(filePath);
+
+      doc.pipe(writeStream);
+
+      let pageNumber = 1;
+
+      this._addPortada(doc);
+
       doc.addPage();
       this._addHeader(doc, options.titulo);
-      doc.moveDown(1);
-      doc.fontSize(14).font(this.fonts.bold).fillColor(this.colors.primary)
-        .text('Distribución por Tipo de Sacramento', 50);
-      doc.moveDown(1.5);
-      this._addChartToPage(doc, chartImageTipo);
+      this._addFilterInfo(doc, filter, sacramentos.length);
+
+      if (options.incluirEstadisticas && estadisticas) {
+        this._addEstadisticasResumen(doc, estadisticas);
+      }
+
       this._addFooter(doc, pageNumber++);
-    } catch (err) {
-      console.error('Error generando gráfica de tipos:', err.message);
-    }
 
-  
-    if (options.incluirEstadisticas && estadisticas) {
-      // Gráfica por parroquia
-      if (estadisticas.por_parroquia && estadisticas.por_parroquia.length > 1) {
-        try {
-          const chartImageParroquia = await this._generateChartByParroquia(estadisticas.por_parroquia);
+      doc.addPage();
+      this._addHeader(doc, options.titulo);
+
+      this._addTable(doc, sacramentos, fields, () => {
+        this._addFooter(doc, pageNumber++);
+        doc.addPage();
+        this._addHeader(doc, options.titulo);
+      });
+
+      this._addFooter(doc, pageNumber++);
+
+      try {
+        if (sacramentos.length > 0) {
+          const chartImageTipo = await this._generateChartByType(sacramentos);
+
           doc.addPage();
           this._addHeader(doc, options.titulo);
+
           doc.moveDown(1);
-          doc.fontSize(14).font(this.fonts.bold).fillColor(this.colors.primary)
-            .text('Distribución por Parroquia', 50);
+          doc.fontSize(14)
+            .font(this.fonts.bold)
+            .fillColor(this.colors.primary)
+            .text('Distribución por Tipo de Sacramento', 50);
+
           doc.moveDown(1.5);
-          this._addChartToPage(doc, chartImageParroquia);
+          this._addChartToPage(doc, chartImageTipo);
           this._addFooter(doc, pageNumber++);
-        } catch (err) {
-          console.error('Error generando gráfica de parroquias:', err.message);
+        }
+      } catch (err) {
+        console.error('Error generando gráfica de tipos:', err.message);
+      }
+
+      if (options.incluirEstadisticas && estadisticas) {
+        if (estadisticas.por_parroquia && estadisticas.por_parroquia.length > 1) {
+          try {
+            const chartImageParroquia = await this._generateChartByParroquia(estadisticas.por_parroquia);
+
+            doc.addPage();
+            this._addHeader(doc, options.titulo);
+
+            doc.moveDown(1);
+            doc.fontSize(14)
+              .font(this.fonts.bold)
+              .fillColor(this.colors.primary)
+              .text('Distribución por Parroquia', 50);
+
+            doc.moveDown(1.5);
+            this._addChartToPage(doc, chartImageParroquia);
+            this._addFooter(doc, pageNumber++);
+          } catch (err) {
+            console.error('Error generando gráfica de parroquias:', err.message);
+          }
+        }
+
+        if (estadisticas.por_mes && estadisticas.por_mes.length > 1) {
+          try {
+            const chartImageMes = await this._generateChartByMonth(estadisticas.por_mes);
+
+            doc.addPage();
+            this._addHeader(doc, options.titulo);
+
+            doc.moveDown(1);
+            doc.fontSize(14)
+              .font(this.fonts.bold)
+              .fillColor(this.colors.primary)
+              .text('Distribución Temporal (por mes)', 50);
+
+            doc.moveDown(1.5);
+            this._addChartToPage(doc, chartImageMes);
+            this._addFooter(doc, pageNumber++);
+          } catch (err) {
+            console.error('Error generando gráfica de meses:', err.message);
+          }
         }
       }
 
-      // Gráfica por meses
-      if (estadisticas.por_mes && estadisticas.por_mes.length > 1) {
-        try {
-          const chartImageMes = await this._generateChartByMonth(estadisticas.por_mes);
-          doc.addPage();
-          this._addHeader(doc, options.titulo);
-          doc.moveDown(1);
-          doc.fontSize(14).font(this.fonts.bold).fillColor(this.colors.primary)
-            .text('Distribución Temporal (por mes)', 50);
-          doc.moveDown(1.5);
-          this._addChartToPage(doc, chartImageMes);
-          this._addFooter(doc, pageNumber++);
-        } catch (err) {
-          console.error('Error generando gráfica de meses:', err.message);
-        }
-      }
-    }
+      doc.end();
 
-    doc.end();
-    return this._createFileInfoPromise(fileName, filePath);
+      await new Promise((resolve, reject) => {
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
+      });
+
+      setTimeout(() => {
+        fs.unlink(filePath, () => {});
+      }, this.fileRetentionTime);
+
+      return {
+        fileName,
+        filePath,
+        downloadUrl: `/download/${fileName}`
+      };
+
+    } catch (error) {
+      console.error('ERROR REAL AL GENERAR PDF:', error);
+      console.error('STACK:', error.stack);
+      throw new Error(`Error al generar PDF: ${error.message}`);
+    }
   }
 
   _addEstadisticasResumen(doc, estadisticas) {
     doc.moveDown(1);
-    doc.fontSize(14).font(this.fonts.bold).fillColor(this.colors.primary)
+
+    doc.fontSize(14)
+      .font(this.fonts.bold)
+      .fillColor(this.colors.primary)
       .text('Resumen Estadístico', 50);
+
     doc.moveDown(0.5);
 
     const boxY = doc.y;
     const boxHeight = 120;
-    doc.rect(50, boxY, doc.page.width - 100, boxHeight)
-      .fillColor(this.colors.light).fill();
 
-    doc.fontSize(11).font(this.fonts.regular).fillColor(this.colors.textDark);
-    
+    doc.rect(50, boxY, doc.page.width - 100, boxHeight)
+      .fillColor(this.colors.light)
+      .fill();
+
+    doc.fontSize(11)
+      .font(this.fonts.regular)
+      .fillColor(this.colors.textDark);
+
     let currentY = boxY + 15;
     const leftCol = 70;
     const rightCol = 320;
 
     doc.font(this.fonts.bold).text('Total de sacramentos:', leftCol, currentY);
     doc.font(this.fonts.regular).text(estadisticas.total?.toString() || '0', leftCol + 150, currentY);
-    
+
     currentY += 20;
     doc.font(this.fonts.bold).text('Sacramentos activos:', leftCol, currentY);
     doc.font(this.fonts.regular).fillColor('#66bb6a')
       .text(estadisticas.activos?.toString() || '0', leftCol + 150, currentY);
-    
+
     currentY += 20;
     doc.font(this.fonts.regular).fillColor(this.colors.textDark);
     doc.font(this.fonts.bold).text('Sacramentos inactivos:', leftCol, currentY);
@@ -166,13 +215,14 @@ class PDFGenerator {
 
     currentY = boxY + 15;
     doc.fillColor(this.colors.textDark);
+
     doc.font(this.fonts.bold).text('Tipos diferentes:', rightCol, currentY);
     doc.font(this.fonts.regular).text(estadisticas.por_tipo?.length?.toString() || '0', rightCol + 150, currentY);
-    
+
     currentY += 20;
     doc.font(this.fonts.bold).text('Parroquias:', rightCol, currentY);
     doc.font(this.fonts.regular).text(estadisticas.por_parroquia?.length?.toString() || '0', rightCol + 150, currentY);
-    
+
     currentY += 20;
     doc.font(this.fonts.bold).text('Usuarios registradores:', rightCol, currentY);
     doc.font(this.fonts.regular).text(estadisticas.por_usuario?.length?.toString() || '0', rightCol + 150, currentY);
@@ -180,16 +230,25 @@ class PDFGenerator {
     doc.moveDown(4);
   }
 
-  _addFilterInfo(doc, filter, total) {
+  _addFilterInfo(doc, filter = {}, total = 0) {
     const boxHeight = this._calculateFilterBoxHeight(filter);
-    
+
     doc.rect(50, doc.y, doc.page.width - 100, boxHeight)
-      .fillColor(this.colors.light).fill();
-    
+      .fillColor(this.colors.light)
+      .fill();
+
     const startY = doc.y + 10;
-    doc.fontSize(14).font(this.fonts.bold).fillColor(this.colors.primary)
+
+    doc.fontSize(14)
+      .font(this.fonts.bold)
+      .fillColor(this.colors.primary)
       .text('Criterios de filtrado:', 60, startY);
-    doc.fontSize(10).font(this.fonts.regular).fillColor(this.colors.textDark);
+
+    doc.moveDown(0.5);
+
+    doc.fontSize(10)
+      .font(this.fonts.regular)
+      .fillColor(this.colors.textDark);
 
     const filtros = this._buildFiltersList(filter);
 
@@ -201,115 +260,136 @@ class PDFGenerator {
     } else {
       doc.text('Sin filtros aplicados - Mostrando todos los sacramentos', 60, doc.y, { align: 'left' });
     }
-    
+
     doc.moveDown(0.8);
-    doc.font(this.fonts.bold).fillColor(this.colors.accent)
+
+    doc.font(this.fonts.bold)
+      .fillColor(this.colors.accent)
       .text(`Total de sacramentos encontrados: ${total}`, 60);
+
     doc.moveDown(2);
   }
 
-  _calculateFilterBoxHeight(filter) {
+  _calculateFilterBoxHeight(filter = {}) {
     const filtros = this._buildFiltersList(filter);
     const numFiltros = filtros.length || 1;
     return Math.max(90, 60 + (numFiltros * 15));
   }
 
-  _buildFiltersList(filter) {
+  _buildFiltersList(filter = {}) {
     const filtros = [];
-    
+
     if (filter.tipo_sacramento_id_tipo) {
       filtros.push(`Tipo de Sacramento: ID ${filter.tipo_sacramento_id_tipo}`);
     }
+
     if (filter.institucion_parroquia_id_parroquia) {
       filtros.push(`Parroquia: ID ${filter.institucion_parroquia_id_parroquia}`);
     }
+
     if (filter.usuario_id_usuario) {
       filtros.push(`Usuario: ID ${filter.usuario_id_usuario}`);
     }
-    
+
     if (filter.activo !== undefined && filter.activo !== null) {
       filtros.push(`Estado: ${filter.activo ? 'Activos' : 'Inactivos'}`);
     }
-    
+
     if (filter.foja) {
       filtros.push(`Foja: ${filter.foja}`);
     }
+
     if (filter.numero) {
       filtros.push(`Número: ${filter.numero}`);
     }
-    
+
     if (filter.numero_desde || filter.numero_hasta) {
       const desde = filter.numero_desde || '∞';
       const hasta = filter.numero_hasta || '∞';
       filtros.push(`Rango de números: ${desde} - ${hasta}`);
     }
-    
+
     if (filter.anio_sacramento) {
       filtros.push(`Año sacramento: ${filter.anio_sacramento}`);
     }
-    
+
     if (filter.mes_sacramento) {
-      const meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 
-                     'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
-      filtros.push(`Mes sacramento: ${meses[filter.mes_sacramento - 1]}`);
+      const meses = [
+        'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+        'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+      ];
+
+      filtros.push(`Mes sacramento: ${meses[filter.mes_sacramento - 1] || filter.mes_sacramento}`);
     }
-    
+
     if (filter.fecha_sacramento_desde || filter.fecha_sacramento_hasta) {
-      const desde = filter.fecha_sacramento_desde 
-        ? moment(filter.fecha_sacramento_desde).format('DD/MM/YYYY') 
+      const desde = filter.fecha_sacramento_desde
+        ? moment(filter.fecha_sacramento_desde).format('DD/MM/YYYY')
         : '∞';
-      const hasta = filter.fecha_sacramento_hasta 
-        ? moment(filter.fecha_sacramento_hasta).format('DD/MM/YYYY') 
+
+      const hasta = filter.fecha_sacramento_hasta
+        ? moment(filter.fecha_sacramento_hasta).format('DD/MM/YYYY')
         : '∞';
+
       filtros.push(`Rango fechas sacramento: ${desde} - ${hasta}`);
     }
-    
+
     if (filter.anio_registro) {
       filtros.push(`Año registro: ${filter.anio_registro}`);
     }
-    
+
     if (filter.fecha_registro_desde || filter.fecha_registro_hasta) {
-      const desde = filter.fecha_registro_desde 
-        ? moment(filter.fecha_registro_desde).format('DD/MM/YYYY') 
+      const desde = filter.fecha_registro_desde
+        ? moment(filter.fecha_registro_desde).format('DD/MM/YYYY')
         : '∞';
-      const hasta = filter.fecha_registro_hasta 
-        ? moment(filter.fecha_registro_hasta).format('DD/MM/YYYY') 
+
+      const hasta = filter.fecha_registro_hasta
+        ? moment(filter.fecha_registro_hasta).format('DD/MM/YYYY')
         : '∞';
+
       filtros.push(`Rango fechas registro: ${desde} - ${hasta}`);
     }
-    
+
     if (filter.fecha_actualizacion_desde || filter.fecha_actualizacion_hasta) {
-      const desde = filter.fecha_actualizacion_desde 
-        ? moment(filter.fecha_actualizacion_desde).format('DD/MM/YYYY') 
+      const desde = filter.fecha_actualizacion_desde
+        ? moment(filter.fecha_actualizacion_desde).format('DD/MM/YYYY')
         : '∞';
-      const hasta = filter.fecha_actualizacion_hasta 
-        ? moment(filter.fecha_actualizacion_hasta).format('DD/MM/YYYY') 
+
+      const hasta = filter.fecha_actualizacion_hasta
+        ? moment(filter.fecha_actualizacion_hasta).format('DD/MM/YYYY')
         : '∞';
+
       filtros.push(`Rango fechas actualización: ${desde} - ${hasta}`);
     }
-    
+
     if (filter.search) {
       filtros.push(`Búsqueda: "${filter.search}"`);
     }
-    
+
     if (filter.orderBy) {
       const dir = filter.orderDirection === 'DESC' ? 'Descendente' : 'Ascendente';
       filtros.push(`Orden: ${filter.orderBy} (${dir})`);
     }
-    
+
     if (filter.limit) {
       filtros.push(`Límite: ${filter.limit} registros`);
     }
+
     if (filter.offset) {
       filtros.push(`Desde registro: ${filter.offset}`);
     }
-    
+
     return filtros;
   }
 
-  async _generateChartByType(sacramentos) {
+  async _generateChartByType(sacramentos = []) {
     const tipoCounts = sacramentos.reduce((acc, sac) => {
-      const tipo = sac.tipoSacramento?.nombre || 'Sin tipo';
+      const tipo =
+        sac.tipoSacramento?.nombre ||
+        sac.tipo_sacramento?.nombre ||
+        sac.tipo_sacramento ||
+        'Sin tipo';
+
       acc[tipo] = (acc[tipo] || 0) + 1;
       return acc;
     }, {});
@@ -321,10 +401,10 @@ class PDFGenerator {
     );
   }
 
-  async _generateChartByParroquia(porParroquia) {
-    const labels = porParroquia?.map(p => p.parroquia) || [];
-    const data = porParroquia?.map(p => p.cantidad) || [];
-    
+  async _generateChartByParroquia(porParroquia = []) {
+    const labels = porParroquia.map(p => p.parroquia || p.nombre || 'Sin parroquia');
+    const data = porParroquia.map(p => Number(p.cantidad || p.total || 0));
+
     return await this._generatePieOrBarChart(
       labels,
       data,
@@ -332,13 +412,14 @@ class PDFGenerator {
     );
   }
 
-  async _generateChartByMonth(porMes) {
+  async _generateChartByMonth(porMes = []) {
     const width = 600;
     const height = 400;
+
     const chartJSNodeCanvas = new ChartJSNodeCanvas({ width, height });
 
-    const labels = porMes?.map(m => m.periodo) || [];
-    const data = porMes?.map(m => m.cantidad) || [];
+    const labels = porMes.map(m => m.periodo || m.mes || 'Sin periodo');
+    const data = porMes.map(m => Number(m.cantidad || m.total || 0));
 
     const configuration = {
       type: 'line',
@@ -354,6 +435,7 @@ class PDFGenerator {
         }]
       },
       options: {
+        responsive: false,
         plugins: {
           title: {
             display: true,
@@ -379,15 +461,16 @@ class PDFGenerator {
     return await chartJSNodeCanvas.renderToBuffer(configuration);
   }
 
-  async _generatePieOrBarChart(labels, data, title) {
+  async _generatePieOrBarChart(labels = [], data = [], title = '') {
     const width = 600;
     const height = 400;
-    const chartJSNodeCanvas = new ChartJSNodeCanvas({
-      width,
-      height
-    });
 
-    const total = data.reduce((sum, val) => sum + (val || 0), 0);
+    const chartJSNodeCanvas = new ChartJSNodeCanvas({ width, height });
+
+    if (!labels.length || !data.length) {
+      labels = ['Sin datos'];
+      data = [1];
+    }
 
     const configuration = {
       type: labels.length === 1 ? 'bar' : 'pie',
@@ -397,7 +480,13 @@ class PDFGenerator {
           label: 'Sacramentos',
           data,
           backgroundColor: labels.length === 1 ? ['#ab47bc'] : [
-            '#ab47bc', '#42a5f5', '#ffca28', '#ef5350', '#66bb6a', '#26c6da', '#ffa726'
+            '#ab47bc',
+            '#42a5f5',
+            '#ffca28',
+            '#ef5350',
+            '#66bb6a',
+            '#26c6da',
+            '#ffa726'
           ],
           borderColor: '#fff',
           borderWidth: 2
@@ -423,7 +512,7 @@ class PDFGenerator {
         scales: labels.length === 1 ? {
           y: {
             beginAtZero: true,
-            max: Math.max(...(data || [1])) + 1
+            max: Math.max(...data) + 1
           }
         } : {}
       }
@@ -437,19 +526,20 @@ class PDFGenerator {
     const chartHeight = 300;
     const x = (doc.page.width - chartWidth) / 2;
     const y = doc.y + 20;
-    
+
     try {
       doc.image(chartImage, x, y, {
         width: chartWidth,
         height: chartHeight
       });
+
       doc.moveDown(16);
     } catch (err) {
       console.error('Error agregando imagen de gráfica:', err.message);
     }
   }
 
-  _addTable(doc, sacramentos, fields, onNewPage) {
+  _addTable(doc, sacramentos = [], fields = [], onNewPage) {
     const columnTitles = {
       id_sacramento: 'ID',
       fecha_sacramento: 'Fecha',
@@ -481,58 +571,80 @@ class PDFGenerator {
     let y = doc.y;
     const footerHeight = 50;
 
-    const totalUsedWidth = fields.reduce((sum, field) => sum + (columnWidths[field] || 70), 0);
+    const totalUsedWidth = fields.reduce((sum, field) => {
+      return sum + (columnWidths[field] || 70);
+    }, 0);
+
     const availableWidth = doc.page.width - 100;
 
     let adjustmentFactor = 1;
+
     if (totalUsedWidth < availableWidth) {
       adjustmentFactor = availableWidth / totalUsedWidth;
     }
 
     const adjustedWidths = {};
+
     fields.forEach(field => {
       adjustedWidths[field] = (columnWidths[field] || 70) * adjustmentFactor;
     });
 
     const drawHeader = () => {
       let currentX = startX;
+
       doc.rect(startX, y, availableWidth, baseRowHeight)
-        .fillColor(this.colors.primary).fill();
-      
-      doc.font(this.fonts.bold).fontSize(10).fillColor('white');
-      
-      fields.forEach((field) => {
+        .fillColor(this.colors.primary)
+        .fill();
+
+      doc.font(this.fonts.bold)
+        .fontSize(10)
+        .fillColor('white');
+
+      fields.forEach(field => {
         const colWidth = adjustedWidths[field];
+
         doc.text(columnTitles[field] || field, currentX + 3, y + 5, {
           width: colWidth - 6,
           ellipsis: true
         });
+
         currentX += colWidth;
       });
-      
+
       y += baseRowHeight;
     };
 
     drawHeader();
-    doc.font(this.fonts.regular).fontSize(9).fillColor(this.colors.textDark);
+
+    if (!sacramentos.length) {
+      doc.font(this.fonts.regular)
+        .fontSize(10)
+        .fillColor(this.colors.secondary)
+        .text('No se encontraron registros para mostrar.', startX, y + 10);
+
+      return;
+    }
 
     sacramentos.forEach((sacramento, idx) => {
+      doc.font(this.fonts.regular)
+        .fontSize(9)
+        .fillColor(this.colors.textDark);
+
       let maxLines = 1;
-      let needsMultipleLines = false;
-      
-      fields.forEach((field) => {
+
+      fields.forEach(field => {
         const colWidth = adjustedWidths[field];
-        let val = this._getFieldValue(sacramento, field);
-        
+        const val = this._getFieldValue(sacramento, field);
         const availableTextWidth = colWidth - 6;
+
         const words = val.split(' ');
         let currentLine = '';
         let lines = 1;
-        
-        for (let word of words) {
+
+        for (const word of words) {
           const testLine = currentLine + (currentLine ? ' ' : '') + word;
           const testWidth = doc.widthOfString(testLine);
-          
+
           if (testWidth > availableTextWidth && currentLine !== '') {
             lines++;
             currentLine = word;
@@ -540,17 +652,12 @@ class PDFGenerator {
             currentLine = testLine;
           }
         }
-        
-        if (lines > 1) {
-          needsMultipleLines = true;
-          maxLines = Math.max(maxLines, lines);
-        }
+
+        maxLines = Math.max(maxLines, lines);
       });
-      
-      const rowHeight = needsMultipleLines ? 
-        Math.max(baseRowHeight, maxLines * 12 + 8) : 
-        baseRowHeight;
-      
+
+      const rowHeight = Math.max(baseRowHeight, maxLines * 12 + 8);
+
       if (y + rowHeight + footerHeight > doc.page.height) {
         onNewPage();
         y = doc.y;
@@ -559,20 +666,22 @@ class PDFGenerator {
 
       if (idx % 2 === 0) {
         doc.rect(startX, y, availableWidth, rowHeight)
-          .fillColor(this.colors.light).fill();
+          .fillColor(this.colors.light)
+          .fill();
       }
 
       let currentX = startX;
-      fields.forEach((field) => {
+
+      fields.forEach(field => {
         const colWidth = adjustedWidths[field];
-        let val = this._getFieldValue(sacramento, field);
-        
+        const val = this._getFieldValue(sacramento, field);
+
         if (field === 'activo') {
           doc.fillColor(sacramento.activo ? '#66bb6a' : '#ef5350');
         } else {
           doc.fillColor(this.colors.textDark);
         }
-        
+
         doc.text(val, currentX + 3, y + 5, {
           width: colWidth - 6,
           height: rowHeight - 10,
@@ -580,7 +689,7 @@ class PDFGenerator {
           ellipsis: false,
           lineBreak: true
         });
-        
+
         currentX += colWidth;
       });
 
@@ -588,58 +697,86 @@ class PDFGenerator {
     });
   }
 
-  _getFieldValue(sacramento, field) {
+  _getFieldValue(sacramento = {}, field) {
     let val = '';
-    
+
     try {
-      switch(field) {
+      switch (field) {
         case 'id_sacramento':
           val = sacramento?.id_sacramento?.toString() || '';
           break;
+
         case 'fecha_sacramento':
-          val = sacramento?.fecha_sacramento ? moment(sacramento.fecha_sacramento).format('DD/MM/YYYY') : '';
+          val = sacramento?.fecha_sacramento
+            ? moment(sacramento.fecha_sacramento).format('DD/MM/YYYY')
+            : '';
           break;
+
         case 'tipo_sacramento':
-          val = sacramento?.tipoSacramento?.nombre || '';
+          val =
+            sacramento?.tipoSacramento?.nombre ||
+            sacramento?.tipo_sacramento?.nombre ||
+            sacramento?.tipo_sacramento ||
+            '';
           break;
+
         case 'foja':
-          val = sacramento?.foja || '';
+          val = sacramento?.foja?.toString() || '';
           break;
+
         case 'numero':
           val = sacramento?.numero?.toString() || '';
           break;
+
         case 'parroquia':
-          val = sacramento?.parroquia?.nombre || '';
+          val =
+            sacramento?.parroquia?.nombre ||
+            sacramento?.institucionParroquia?.nombre ||
+            sacramento?.institucion_parroquia?.nombre ||
+            '';
           break;
+
         case 'usuario':
           if (sacramento?.usuario) {
             val = `${sacramento.usuario.nombre || ''} ${sacramento.usuario.apellido_paterno || ''}`.trim();
           }
           break;
+
         case 'activo':
-          val = sacramento?.activo ? '✓ Activo' : '✗ Inactivo';
+          val = sacramento?.activo ? 'Activo' : 'Inactivo';
           break;
+
         case 'fecha_registro':
-          val = sacramento?.fecha_registro ? moment(sacramento.fecha_registro).format('DD/MM/YYYY HH:mm') : '';
+          val = sacramento?.fecha_registro
+            ? moment(sacramento.fecha_registro).format('DD/MM/YYYY HH:mm')
+            : '';
           break;
+
         case 'fecha_actualizacion':
-          val = sacramento?.fecha_actualizacion ? moment(sacramento.fecha_actualizacion).format('DD/MM/YYYY HH:mm') : '';
+          val = sacramento?.fecha_actualizacion
+            ? moment(sacramento.fecha_actualizacion).format('DD/MM/YYYY HH:mm')
+            : '';
           break;
+
         default:
-          val = sacramento?.[field]?.toString() || '';
+          val = sacramento?.[field] !== undefined && sacramento?.[field] !== null
+            ? sacramento[field].toString()
+            : '';
       }
     } catch (error) {
       console.error(`Error al obtener valor de campo ${field}:`, error);
       val = '';
     }
-    
+
     return val;
   }
 
   _addPortada(doc) {
     const portadaPath = path.join(__dirname, '../assets/portadaof3.png');
+
     if (fs.existsSync(portadaPath)) {
       doc.addPage({ size: 'A4', margin: 0 });
+
       doc.image(portadaPath, 0, 0, {
         width: doc.page.width,
         height: doc.page.height
@@ -648,19 +785,32 @@ class PDFGenerator {
   }
 
   _addHeader(doc, titulo = 'Reporte de Sacramentos') {
-    const logoPath = './src/assets/arquidiocesis-24.png';
+    const logoPath = path.join(__dirname, '../assets/arquidiocesis-24.png');
+
     if (fs.existsSync(logoPath)) {
       doc.image(logoPath, 50, 30, { width: 70 });
     }
-    
-    doc.fontSize(22).font(this.fonts.bold).fillColor(this.colors.primary)
+
+    doc.fontSize(22)
+      .font(this.fonts.bold)
+      .fillColor(this.colors.primary)
       .text(titulo, 100, 40, { align: 'center' });
-    doc.fontSize(10).font(this.fonts.italic).fillColor(this.colors.secondary)
-      .text(`Generado: ${moment().format('DD/MM/YYYY HH:mm')}`, { align: 'right' });
+
+    doc.fontSize(10)
+      .font(this.fonts.italic)
+      .fillColor(this.colors.secondary)
+      .text(`Generado: ${moment().format('DD/MM/YYYY HH:mm')}`, {
+        align: 'right'
+      });
 
     const y = Math.max(doc.y + 10, 100);
-    doc.strokeColor(this.colors.accent).lineWidth(1)
-      .moveTo(50, y).lineTo(doc.page.width - 50, y).stroke();
+
+    doc.strokeColor(this.colors.accent)
+      .lineWidth(1)
+      .moveTo(50, y)
+      .lineTo(doc.page.width - 50, y)
+      .stroke();
+
     doc.moveDown(4);
   }
 
@@ -691,31 +841,34 @@ class PDFGenerator {
     doc.restore();
   }
 
-  _createFileInfoPromise(fileName, filePath) {
-    return new Promise((resolve, reject) => {
-      const stream = fs.createReadStream(filePath);
-      stream.on('error', err => reject(err));
-      stream.on('open', () => {
-        setTimeout(() => fs.unlink(filePath, () => {}), this.fileRetentionTime);
-        resolve({ fileName, filePath, downloadUrl: `/download/${fileName}` });
-      });
-    });
-  }
-
   _startCleanupScheduler() {
     this._cleanupOldFiles();
-    setInterval(() => this._cleanupOldFiles(), this.cleanupInterval);
+
+    setInterval(() => {
+      this._cleanupOldFiles();
+    }, this.cleanupInterval);
   }
 
   _cleanupOldFiles() {
-    if (!fs.existsSync(this.uploadDir)) return;
-    const now = Date.now();
-    fs.readdirSync(this.uploadDir).forEach(file => {
-      const filePath = path.join(this.uploadDir, file);
-      if (fs.statSync(filePath).mtimeMs < now - this.cleanupInterval) {
-        fs.unlinkSync(filePath);
-      }
-    });
+    try {
+      if (!fs.existsSync(this.uploadDir)) return;
+
+      const now = Date.now();
+
+      fs.readdirSync(this.uploadDir).forEach(file => {
+        const filePath = path.join(this.uploadDir, file);
+
+        if (!fs.existsSync(filePath)) return;
+
+        const stat = fs.statSync(filePath);
+
+        if (stat.mtimeMs < now - this.cleanupInterval) {
+          fs.unlinkSync(filePath);
+        }
+      });
+    } catch (error) {
+      console.error('Error limpiando archivos antiguos:', error.message);
+    }
   }
 }
 
