@@ -61,7 +61,7 @@ class SacramentoService {
 
       console.log(`Token enviado: ${token ? 'Sí' : 'No'}`);
 
-      const response = await axios.get(`${REST_API_URL}/all`, { headers });
+      const response = await axios.get(`${REST_API_URL}/all`, { headers, params: { limit: 10000 } });
 
       if (!response.data.ok) {
         throw new Error('Fallo al consumir sacramentos de REST API');
