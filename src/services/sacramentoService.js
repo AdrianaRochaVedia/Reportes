@@ -6,7 +6,56 @@ console.log('Servidor de la Api corriendo:', REST_API_URL);
 class SacramentoService {
   constructor() {
     this.cache = new Map();
+    this.pending = new Map();
     this.cacheTTL = 60 * 1000;
+    this.catalogCacheTTL = 5 * 60 * 1000;
+  }
+
+  // Evita que llamadas concurrentes para la misma clave disparen peticiones
+  // HTTP duplicadas contra la API REST (causa de los 429 Too Many Requests
+  // cuando dos reportes se piden casi al mismo tiempo).
+  async dedupedFetch(cacheKey, ttl, fetcher) {
+    const cached = this.getFromCache(cacheKey);
+    if (cached) return cached;
+
+    if (this.pending.has(cacheKey)) {
+      return this.pending.get(cacheKey);
+    }
+
+    const promise = (async () => {
+      try {
+        const data = await fetcher();
+        this.setCache(cacheKey, data, ttl);
+        return data;
+      } finally {
+        this.pending.delete(cacheKey);
+      }
+    })();
+
+    this.pending.set(cacheKey, promise);
+    return promise;
+  }
+
+  // Reintenta con backoff exponencial cuando la API REST responde 429/503,
+  // respetando el header Retry-After si lo manda.
+  async requestWithRetry(requestFn, { retries = 3, baseDelay = 600 } = {}) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await requestFn();
+      } catch (error) {
+        const status = error.response?.status;
+        const isRetryable = status === 429 || status === 503;
+
+        if (!isRetryable || attempt === retries) throw error;
+
+        const retryAfterHeader = error.response?.headers?.['retry-after'];
+        const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : null;
+        const delay = retryAfterMs || baseDelay * Math.pow(2, attempt);
+
+        console.warn(`API REST respondió ${status}, reintentando en ${delay}ms (intento ${attempt + 1}/${retries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
 
   getCacheKey(key, token) {
@@ -18,7 +67,7 @@ class SacramentoService {
 
     if (!cached) return null;
 
-    const isExpired = Date.now() - cached.timestamp > this.cacheTTL;
+    const isExpired = Date.now() - cached.timestamp > cached.ttl;
 
     if (isExpired) {
       this.cache.delete(key);
@@ -28,10 +77,11 @@ class SacramentoService {
     return cached.data;
   }
 
-  setCache(key, data) {
+  setCache(key, data, ttl = this.cacheTTL) {
     this.cache.set(key, {
       data,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      ttl
     });
   }
 
@@ -48,34 +98,26 @@ class SacramentoService {
   }
 
   async getAllSacramentos(token) {
+    const cacheKey = this.getCacheKey('sacramentos-all', token);
+
     try {
-      const cacheKey = this.getCacheKey('sacramentos-all', token);
-      const cachedData = this.getFromCache(cacheKey);
+      return await this.dedupedFetch(cacheKey, this.cacheTTL, async () => {
+        const headers = this.getHeaders(token);
 
-      if (cachedData) {
-        console.log(`Sacramentos obtenidos desde cache: ${cachedData.length}`);
-        return cachedData;
-      }
+        const response = await this.requestWithRetry(() =>
+          axios.get(`${REST_API_URL}/all`, { headers, params: { limit: 10000 } })
+        );
 
-      const headers = this.getHeaders(token);
+        if (!response.data.ok) {
+          throw new Error('Fallo al consumir sacramentos de REST API');
+        }
 
-      console.log(`Token enviado: ${token ? 'Sí' : 'No'}`);
+        const sacramentos = response.data.sacramento || [];
 
-      const response = await axios.get(`${REST_API_URL}/all`, { headers, params: { limit: 10000 } });
+        console.log(`Sacramentos obtenidos: ${sacramentos.length}`);
 
-      if (!response.data.ok) {
-        throw new Error('Fallo al consumir sacramentos de REST API');
-      }
-
-      const sacramentos = response.data.sacramento || [];
-
-      console.log(`Sacramentos obtenidos: ${sacramentos.length}`);
-
-      const sacramentosEnriquecidos = await this.enrichSacramentos(sacramentos, token);
-
-      this.setCache(cacheKey, sacramentosEnriquecidos);
-
-      return sacramentosEnriquecidos;
+        return this.enrichSacramentos(sacramentos, token);
+      });
     } catch (error) {
       if (error.response) {
         throw new Error(`Error ${error.response.status}: ${JSON.stringify(error.response.data)}`);
@@ -125,24 +167,20 @@ class SacramentoService {
   }
 
   async getUsuarios(ids, token) {
+    if (!ids.length) return [];
+
+    const cacheKey = this.getCacheKey('usuarios-all', token);
+
     try {
-      if (!ids.length) return [];
+      return await this.dedupedFetch(cacheKey, this.catalogCacheTTL, async () => {
+        const headers = this.getHeaders(token);
+        const baseUrl = REST_API_URL.replace('/sacramentos', '');
+        const url = `${baseUrl}/usuarios/all`;
 
-      const cacheKey = this.getCacheKey('usuarios-all', token);
-      const cachedData = this.getFromCache(cacheKey);
+        const response = await this.requestWithRetry(() => axios.get(url, { headers }));
 
-      if (cachedData) return cachedData;
-
-      const headers = this.getHeaders(token);
-      const baseUrl = REST_API_URL.replace('/sacramentos', '');
-      const url = `${baseUrl}/usuarios/all`;
-
-      const response = await axios.get(url, { headers });
-      const usuarios = response.data.ok ? response.data.usuarios || [] : [];
-
-      this.setCache(cacheKey, usuarios);
-
-      return usuarios;
+        return response.data.ok ? response.data.usuarios || [] : [];
+      });
     } catch (error) {
       console.error('Error al obtener usuarios:', error.response?.status || error.message);
       return [];
@@ -150,37 +188,32 @@ class SacramentoService {
   }
 
   async getParroquias(ids, token) {
+    if (!ids.length) return [];
+
+    const cacheKey = this.getCacheKey('parroquias-all', token);
+
     try {
-      if (!ids.length) return [];
+      return await this.dedupedFetch(cacheKey, this.catalogCacheTTL, async () => {
+        const headers = this.getHeaders(token);
+        const baseUrl = REST_API_URL.replace('/sacramentos', '');
+        const url = `${baseUrl}/parroquias`;
 
-      const cacheKey = this.getCacheKey('parroquias-all', token);
-      const cachedData = this.getFromCache(cacheKey);
+        const response = await this.requestWithRetry(() => axios.get(url, { headers }));
 
-      if (cachedData) return cachedData;
+        if (Array.isArray(response.data)) {
+          return response.data;
+        } else if (response.data.ok && response.data.institucion_parroquia) {
+          return response.data.institucion_parroquia;
+        } else if (response.data.ok && response.data.parroquias) {
+          return response.data.parroquias;
+        } else if (response.data.institucion_parroquia) {
+          return response.data.institucion_parroquia;
+        } else if (response.data.parroquias) {
+          return response.data.parroquias;
+        }
 
-      const headers = this.getHeaders(token);
-      const baseUrl = REST_API_URL.replace('/sacramentos', '');
-      const url = `${baseUrl}/parroquias`;
-
-      const response = await axios.get(url, { headers });
-
-      let parroquias = [];
-
-      if (Array.isArray(response.data)) {
-        parroquias = response.data;
-      } else if (response.data.ok && response.data.institucion_parroquia) {
-        parroquias = response.data.institucion_parroquia;
-      } else if (response.data.ok && response.data.parroquias) {
-        parroquias = response.data.parroquias;
-      } else if (response.data.institucion_parroquia) {
-        parroquias = response.data.institucion_parroquia;
-      } else if (response.data.parroquias) {
-        parroquias = response.data.parroquias;
-      }
-
-      this.setCache(cacheKey, parroquias);
-
-      return parroquias;
+        return [];
+      });
     } catch (error) {
       console.error('Error al obtener parroquias:', error.response?.status || error.message);
       return [];
@@ -188,41 +221,36 @@ class SacramentoService {
   }
 
   async getTipos(ids, token) {
+    if (!ids.length) return [];
+
+    const cacheKey = this.getCacheKey('tipos-all', token);
+
     try {
-      if (!ids.length) return [];
+      return await this.dedupedFetch(cacheKey, this.catalogCacheTTL, async () => {
+        const headers = this.getHeaders(token);
+        const baseUrl = REST_API_URL.replace('/sacramentos', '');
+        const url = `${baseUrl}/tiposacramentos/all`;
 
-      const cacheKey = this.getCacheKey('tipos-all', token);
-      const cachedData = this.getFromCache(cacheKey);
+        const response = await this.requestWithRetry(() => axios.get(url, { headers }));
 
-      if (cachedData) return cachedData;
+        if (Array.isArray(response.data)) {
+          return response.data;
+        } else if (response.data.ok && response.data.tipo_sacramento) {
+          return response.data.tipo_sacramento;
+        } else if (response.data.ok && response.data.tiposacramento) {
+          return response.data.tiposacramento;
+        } else if (response.data.ok && response.data.tipos) {
+          return response.data.tipos;
+        } else if (response.data.tipo_sacramento) {
+          return response.data.tipo_sacramento;
+        } else if (response.data.tiposacramento) {
+          return response.data.tiposacramento;
+        } else if (response.data.tipos) {
+          return response.data.tipos;
+        }
 
-      const headers = this.getHeaders(token);
-      const baseUrl = REST_API_URL.replace('/sacramentos', '');
-      const url = `${baseUrl}/tiposacramentos/all`;
-
-      const response = await axios.get(url, { headers });
-
-      let tipos = [];
-
-      if (Array.isArray(response.data)) {
-        tipos = response.data;
-      } else if (response.data.ok && response.data.tipo_sacramento) {
-        tipos = response.data.tipo_sacramento;
-      } else if (response.data.ok && response.data.tiposacramento) {
-        tipos = response.data.tiposacramento;
-      } else if (response.data.ok && response.data.tipos) {
-        tipos = response.data.tipos;
-      } else if (response.data.tipo_sacramento) {
-        tipos = response.data.tipo_sacramento;
-      } else if (response.data.tiposacramento) {
-        tipos = response.data.tiposacramento;
-      } else if (response.data.tipos) {
-        tipos = response.data.tipos;
-      }
-
-      this.setCache(cacheKey, tipos);
-
-      return tipos;
+        return [];
+      });
     } catch (error) {
       console.error('Error al obtener tipos:', error.response?.status || error.message);
       return [];
