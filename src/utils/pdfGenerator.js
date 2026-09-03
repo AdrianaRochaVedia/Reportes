@@ -3,6 +3,7 @@ const path = require('path');
 const PDFDocument = require('pdfkit');
 const moment = require('moment');
 const { ChartJSNodeCanvas } = require('chartjs-node-canvas');
+const ChartDataLabels = require('chartjs-plugin-datalabels');
 
 class PDFGenerator {
   constructor() {
@@ -22,6 +23,28 @@ class PDFGenerator {
       bold: 'Helvetica-Bold',
       italic: 'Helvetica-Oblique'
     };
+
+    // Paleta coherente con la identidad de la app (azules/teal + acentos cálidos)
+    this.chartPalette = [
+      '#1565C0', '#26A69A', '#FFB300', '#7E57C2', '#EF5350',
+      '#66BB6A', '#EC407A', '#42A5F5', '#8D6E63', '#26C6DA'
+    ];
+
+    this.chartWidth = 800;
+    this.chartHeight = 480;
+
+    // Una sola instancia reutilizada: crear un ChartJSNodeCanvas por gráfica
+    // obliga a recargar en frío el binario nativo `canvas` y todo `chart.js/auto`
+    // en cada llamada, lo que dominaba el tiempo de generación del PDF.
+    this.chartRenderer = new ChartJSNodeCanvas({
+      width: this.chartWidth,
+      height: this.chartHeight,
+      backgroundColour: 'white',
+      chartCallback: (ChartJS) => {
+        ChartJS.register(ChartDataLabels);
+        ChartJS.defaults.font.family = "'Helvetica Neue', Helvetica, Arial, sans-serif";
+      }
+    });
 
     this.fileRetentionTime = 3600000;
     this.cleanupInterval = 24 * 60 * 60 * 1000;
@@ -85,70 +108,73 @@ class PDFGenerator {
 
       this._addFooter(doc, pageNumber++);
 
-      try {
-        if (sacramentos.length > 0) {
-          const chartImageTipo = await this._generateChartByType(sacramentos);
+      // Todas las gráficas se generan en paralelo contra el mismo renderer
+      // compartido (ver constructor), en lugar de esperar una por una.
+      const chartJobs = [];
 
-          doc.addPage();
-          this._addHeader(doc, options.titulo);
-
-          doc.moveDown(1);
-          doc.fontSize(14)
-            .font(this.fonts.bold)
-            .fillColor(this.colors.primary)
-            .text('Distribución por Tipo de Sacramento', 50);
-
-          doc.moveDown(1.5);
-          this._addChartToPage(doc, chartImageTipo);
-          this._addFooter(doc, pageNumber++);
-        }
-      } catch (err) {
-        console.error('Error generando gráfica de tipos:', err.message);
+      if (sacramentos.length > 0) {
+        chartJobs.push(
+          this._generateChartByType(sacramentos)
+            .then(buf => ({ key: 'tipo', buf }))
+            .catch(err => {
+              console.error('Error generando gráfica de tipos:', err.message);
+              return null;
+            })
+        );
       }
 
       if (options.incluirEstadisticas && estadisticas) {
         if (estadisticas.por_parroquia && estadisticas.por_parroquia.length > 1) {
-          try {
-            const chartImageParroquia = await this._generateChartByParroquia(estadisticas.por_parroquia);
-
-            doc.addPage();
-            this._addHeader(doc, options.titulo);
-
-            doc.moveDown(1);
-            doc.fontSize(14)
-              .font(this.fonts.bold)
-              .fillColor(this.colors.primary)
-              .text('Distribución por Parroquia', 50);
-
-            doc.moveDown(1.5);
-            this._addChartToPage(doc, chartImageParroquia);
-            this._addFooter(doc, pageNumber++);
-          } catch (err) {
-            console.error('Error generando gráfica de parroquias:', err.message);
-          }
+          chartJobs.push(
+            this._generateChartByParroquia(estadisticas.por_parroquia)
+              .then(buf => ({ key: 'parroquia', buf }))
+              .catch(err => {
+                console.error('Error generando gráfica de parroquias:', err.message);
+                return null;
+              })
+          );
         }
 
         if (estadisticas.por_mes && estadisticas.por_mes.length > 1) {
-          try {
-            const chartImageMes = await this._generateChartByMonth(estadisticas.por_mes);
-
-            doc.addPage();
-            this._addHeader(doc, options.titulo);
-
-            doc.moveDown(1);
-            doc.fontSize(14)
-              .font(this.fonts.bold)
-              .fillColor(this.colors.primary)
-              .text('Distribución Temporal (por mes)', 50);
-
-            doc.moveDown(1.5);
-            this._addChartToPage(doc, chartImageMes);
-            this._addFooter(doc, pageNumber++);
-          } catch (err) {
-            console.error('Error generando gráfica de meses:', err.message);
-          }
+          chartJobs.push(
+            this._generateChartByMonth(estadisticas.por_mes)
+              .then(buf => ({ key: 'mes', buf }))
+              .catch(err => {
+                console.error('Error generando gráfica de meses:', err.message);
+                return null;
+              })
+          );
         }
       }
+
+      const chartResults = await Promise.all(chartJobs);
+      const charts = {};
+      chartResults.forEach(r => {
+        if (r) charts[r.key] = r.buf;
+      });
+
+      const chartPages = [
+        { key: 'tipo', titulo: 'Distribución por Tipo de Sacramento' },
+        { key: 'parroquia', titulo: 'Distribución por Parroquia' },
+        { key: 'mes', titulo: 'Distribución Temporal (por mes)' }
+      ];
+
+      chartPages.forEach(({ key, titulo }) => {
+        if (!charts[key]) return;
+
+        doc.addPage();
+        this._addHeader(doc, options.titulo);
+
+        doc.moveDown(1);
+        doc.fontSize(14)
+          .font(this.fonts.bold)
+          .fillColor(this.colors.primary)
+          .text(titulo, 50);
+
+        doc.moveDown(1.5);
+        this._addChartToPage(doc, charts[key]);
+        this._addFooter(doc, pageNumber++);
+      });
 
       doc.end();
 
@@ -413,13 +439,9 @@ class PDFGenerator {
   }
 
   async _generateChartByMonth(porMes = []) {
-    const width = 600;
-    const height = 400;
-
-    const chartJSNodeCanvas = new ChartJSNodeCanvas({ width, height });
-
     const labels = porMes.map(m => m.periodo || m.mes || 'Sin periodo');
     const data = porMes.map(m => Number(m.cantidad || m.total || 0));
+    const showLabels = data.length <= 12;
 
     const configuration = {
       type: 'line',
@@ -428,106 +450,176 @@ class PDFGenerator {
         datasets: [{
           label: 'Sacramentos por mes',
           data,
-          borderColor: '#ab47bc',
-          backgroundColor: 'rgba(171, 71, 188, 0.1)',
-          tension: 0.4,
+          borderColor: this.colors.primary,
+          backgroundColor: (ctx) => {
+            const { chartArea, ctx: canvasCtx } = ctx.chart;
+            if (!chartArea) return 'rgba(21, 101, 192, 0.15)';
+            const gradient = canvasCtx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+            gradient.addColorStop(0, 'rgba(21, 101, 192, 0.35)');
+            gradient.addColorStop(1, 'rgba(21, 101, 192, 0.02)');
+            return gradient;
+          },
+          borderWidth: 3,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          pointBackgroundColor: '#fff',
+          pointBorderColor: this.colors.primary,
+          pointBorderWidth: 2,
+          tension: 0.35,
           fill: true
         }]
       },
       options: {
         responsive: false,
+        layout: { padding: { top: 10, right: 20, bottom: 10, left: 10 } },
         plugins: {
           title: {
             display: true,
             text: 'Evolución temporal de sacramentos',
-            font: { size: 16 }
+            font: { size: 20, weight: 'bold' },
+            color: this.colors.textDark,
+            padding: { bottom: 6 }
+          },
+          subtitle: {
+            display: true,
+            text: `Total del periodo: ${data.reduce((a, b) => a + b, 0)}`,
+            font: { size: 13, style: 'italic' },
+            color: this.colors.secondary,
+            padding: { bottom: 20 }
           },
           legend: {
             display: true,
-            position: 'top'
+            position: 'top',
+            labels: { usePointStyle: true, boxWidth: 8, font: { size: 13 } }
+          },
+          datalabels: {
+            display: showLabels,
+            align: 'top',
+            anchor: 'end',
+            color: this.colors.textDark,
+            font: { size: 11, weight: 'bold' },
+            formatter: (value) => value
           }
         },
         scales: {
+          x: {
+            grid: { display: false },
+            ticks: { font: { size: 12 } }
+          },
           y: {
             beginAtZero: true,
-            ticks: {
-              precision: 0
-            }
+            grid: { color: '#E0E0E0', borderDash: [4, 4] },
+            ticks: { precision: 0, font: { size: 12 } }
           }
         }
       }
     };
 
-    return await chartJSNodeCanvas.renderToBuffer(configuration);
+    return await this.chartRenderer.renderToBuffer(configuration);
   }
 
   async _generatePieOrBarChart(labels = [], data = [], title = '') {
-    const width = 600;
-    const height = 400;
-
-    const chartJSNodeCanvas = new ChartJSNodeCanvas({ width, height });
-
     if (!labels.length || !data.length) {
       labels = ['Sin datos'];
       data = [1];
     }
 
+    const isSingle = labels.length === 1;
+    const total = data.reduce((a, b) => a + b, 0);
+    const backgroundColors = isSingle
+      ? [this.chartPalette[0]]
+      : labels.map((_, idx) => this.chartPalette[idx % this.chartPalette.length]);
+
     const configuration = {
-      type: labels.length === 1 ? 'bar' : 'pie',
+      type: isSingle ? 'bar' : 'doughnut',
       data: {
         labels,
         datasets: [{
           label: 'Sacramentos',
           data,
-          backgroundColor: labels.length === 1 ? ['#ab47bc'] : [
-            '#ab47bc',
-            '#42a5f5',
-            '#ffca28',
-            '#ef5350',
-            '#66bb6a',
-            '#26c6da',
-            '#ffa726'
-          ],
+          backgroundColor: backgroundColors,
+          hoverBackgroundColor: backgroundColors,
           borderColor: '#fff',
-          borderWidth: 2
+          borderWidth: isSingle ? 0 : 3,
+          borderRadius: isSingle ? 8 : 0,
+          hoverOffset: isSingle ? 0 : 10
         }]
       },
       options: {
         responsive: false,
+        cutout: isSingle ? undefined : '58%',
+        layout: { padding: { top: 10, right: 20, bottom: 10, left: 20 } },
         plugins: {
           title: {
             display: true,
             text: title,
-            font: { size: 16, weight: 'bold' }
+            font: { size: 20, weight: 'bold' },
+            color: this.colors.textDark,
+            padding: { bottom: 6 }
+          },
+          subtitle: {
+            display: true,
+            text: `Total: ${total}`,
+            font: { size: 13, style: 'italic' },
+            color: this.colors.secondary,
+            padding: { bottom: 20 }
           },
           legend: {
-            display: labels.length > 1,
+            display: !isSingle,
             position: 'right',
             labels: {
-              padding: 15,
-              font: { size: 12 }
+              padding: 16,
+              usePointStyle: true,
+              boxWidth: 8,
+              font: { size: 13 }
+            }
+          },
+          datalabels: {
+            color: isSingle ? this.colors.textDark : '#fff',
+            anchor: isSingle ? 'end' : 'center',
+            align: isSingle ? 'top' : 'center',
+            font: { weight: 'bold', size: 13 },
+            formatter: (value) => {
+              if (!total) return value;
+              if (isSingle) return value;
+              const pct = (value / total) * 100;
+              return pct >= 5 ? `${pct.toFixed(1)}%` : '';
             }
           }
         },
-        scales: labels.length === 1 ? {
+        scales: isSingle ? {
           y: {
             beginAtZero: true,
-            max: Math.max(...data) + 1
+            max: Math.max(...data) + 1,
+            grid: { color: '#E0E0E0', borderDash: [4, 4] }
+          },
+          x: {
+            grid: { display: false }
           }
         } : {}
       }
     };
 
-    return await chartJSNodeCanvas.renderToBuffer(configuration);
+    return await this.chartRenderer.renderToBuffer(configuration);
   }
 
   _addChartToPage(doc, chartImage) {
     const chartWidth = 500;
     const chartHeight = 300;
+    const padding = 12;
     const x = (doc.page.width - chartWidth) / 2;
     const y = doc.y + 20;
 
     try {
+      doc.roundedRect(x - padding, y - padding, chartWidth + padding * 2, chartHeight + padding * 2, 8)
+        .fillColor('#FAFAFA')
+        .fill();
+
+      doc.roundedRect(x - padding, y - padding, chartWidth + padding * 2, chartHeight + padding * 2, 8)
+        .strokeColor(this.colors.light)
+        .lineWidth(1)
+        .stroke();
+
       doc.image(chartImage, x, y, {
         width: chartWidth,
         height: chartHeight
