@@ -30,21 +30,38 @@ class PDFGenerator {
       '#66BB6A', '#EC407A', '#42A5F5', '#8D6E63', '#26C6DA'
     ];
 
-    this.chartWidth = 800;
-    this.chartHeight = 480;
+    this.chartWidth = 760;
+    this.chartHeight = 507;
 
     // Una sola instancia reutilizada: crear un ChartJSNodeCanvas por gráfica
     // obliga a recargar en frío el binario nativo `canvas` y todo `chart.js/auto`
     // en cada llamada, lo que dominaba el tiempo de generación del PDF.
+    const chartCallback = (ChartJS) => {
+      ChartJS.register(ChartDataLabels);
+      ChartJS.defaults.font.family = "'Helvetica Neue', Helvetica, Arial, sans-serif";
+    };
+
     this.chartRenderer = new ChartJSNodeCanvas({
       width: this.chartWidth,
       height: this.chartHeight,
       backgroundColour: 'white',
-      chartCallback: (ChartJS) => {
-        ChartJS.register(ChartDataLabels);
-        ChartJS.defaults.font.family = "'Helvetica Neue', Helvetica, Arial, sans-serif";
-      }
+      chartCallback
     });
+
+    // Renderer aparte para la gráfica "banner" (estado activo/inactivo), que
+    // necesita una proporción mucho más ancha y baja que el resto.
+    this.bannerChartWidth = 800;
+    this.bannerChartHeight = 200;
+
+    this.bannerChartRenderer = new ChartJSNodeCanvas({
+      width: this.bannerChartWidth,
+      height: this.bannerChartHeight,
+      backgroundColour: 'white',
+      chartCallback
+    });
+
+    this.chartDisplaySize = { width: 480, height: 320 };
+    this.bannerDisplaySize = { width: 480, height: 120 };
 
     this.fileRetentionTime = 3600000;
     this.cleanupInterval = 24 * 60 * 60 * 1000;
@@ -109,72 +126,82 @@ class PDFGenerator {
       this._addFooter(doc, pageNumber++);
 
       // Todas las gráficas se generan en paralelo contra el mismo renderer
-      // compartido (ver constructor), en lugar de esperar una por una.
+      // compartido (ver constructor), en lugar de esperar una por una. Cada
+      // una regresa, además de la imagen, una lectura ("insight") calculada
+      // a partir de los propios datos.
       const chartJobs = [];
 
       if (sacramentos.length > 0) {
         chartJobs.push(
-          this._generateChartByType(sacramentos)
-            .then(buf => ({ key: 'tipo', buf }))
-            .catch(err => {
-              console.error('Error generando gráfica de tipos:', err.message);
-              return null;
-            })
+          this._generateChartByType(sacramentos).catch(err => {
+            console.error('Error generando gráfica de tipos:', err.message);
+            return null;
+          })
         );
       }
 
       if (options.incluirEstadisticas && estadisticas) {
         if (estadisticas.por_parroquia && estadisticas.por_parroquia.length > 1) {
           chartJobs.push(
-            this._generateChartByParroquia(estadisticas.por_parroquia)
-              .then(buf => ({ key: 'parroquia', buf }))
-              .catch(err => {
-                console.error('Error generando gráfica de parroquias:', err.message);
-                return null;
-              })
+            this._generateChartByParroquia(estadisticas.por_parroquia).catch(err => {
+              console.error('Error generando gráfica de parroquias:', err.message);
+              return null;
+            })
+          );
+        }
+
+        if (estadisticas.por_usuario && estadisticas.por_usuario.length > 1) {
+          chartJobs.push(
+            this._generateChartByUsuario(estadisticas.por_usuario).catch(err => {
+              console.error('Error generando gráfica de usuarios:', err.message);
+              return null;
+            })
+          );
+        }
+
+        if ((estadisticas.activos || 0) + (estadisticas.inactivos || 0) > 0) {
+          chartJobs.push(
+            this._generateActivosInactivosChart(estadisticas).catch(err => {
+              console.error('Error generando gráfica de estado:', err.message);
+              return null;
+            })
           );
         }
 
         if (estadisticas.por_mes && estadisticas.por_mes.length > 1) {
           chartJobs.push(
-            this._generateChartByMonth(estadisticas.por_mes)
-              .then(buf => ({ key: 'mes', buf }))
-              .catch(err => {
-                console.error('Error generando gráfica de meses:', err.message);
-                return null;
-              })
+            this._generateChartByMonth(estadisticas.por_mes).catch(err => {
+              console.error('Error generando gráfica de meses:', err.message);
+              return null;
+            })
           );
         }
       }
 
-      const chartResults = await Promise.all(chartJobs);
-      const charts = {};
-      chartResults.forEach(r => {
-        if (r) charts[r.key] = r.buf;
-      });
+      const chartBlocks = (await Promise.all(chartJobs)).filter(Boolean);
 
-      const chartPages = [
-        { key: 'tipo', titulo: 'Distribución por Tipo de Sacramento' },
-        { key: 'parroquia', titulo: 'Distribución por Parroquia' },
-        { key: 'mes', titulo: 'Distribución Temporal (por mes)' }
-      ];
-
-      chartPages.forEach(({ key, titulo }) => {
-        if (!charts[key]) return;
-
+      if (chartBlocks.length) {
         doc.addPage();
         this._addHeader(doc, options.titulo);
 
-        doc.moveDown(1);
-        doc.fontSize(14)
-          .font(this.fonts.bold)
-          .fillColor(this.colors.primary)
-          .text(titulo, 50);
+        chartBlocks.forEach(block => {
+          const blockHeight = this._estimateChartBlockHeight(block);
+          const footerHeight = 50;
 
-        doc.moveDown(1.5);
-        this._addChartToPage(doc, charts[key]);
+          // Si el siguiente bloque no cabe en lo que queda de la página
+          // actual, se abre una nueva; si cabe, se apila junto al anterior
+          // en vez de forzar una página por gráfica.
+          if (doc.y + blockHeight + footerHeight > doc.page.height) {
+            this._addFooter(doc, pageNumber++);
+            doc.addPage();
+            this._addHeader(doc, options.titulo);
+          }
+
+          this._addChartBlockToPage(doc, block);
+        });
+
         this._addFooter(doc, pageNumber++);
-      });
+      }
 
       doc.end();
 
@@ -408,7 +435,13 @@ class PDFGenerator {
     return filtros;
   }
 
+  _pct(value, total) {
+    return total ? ((value / total) * 100).toFixed(1) : '0.0';
+  }
+
   async _generateChartByType(sacramentos = []) {
+    const titulo = 'Distribución por Tipo de Sacramento';
+
     const tipoCounts = sacramentos.reduce((acc, sac) => {
       const tipo =
         sac.tipoSacramento?.nombre ||
@@ -420,25 +453,260 @@ class PDFGenerator {
       return acc;
     }, {});
 
-    return await this._generatePieOrBarChart(
-      Object.keys(tipoCounts),
-      Object.values(tipoCounts),
-      'Distribución de sacramentos por tipo'
-    );
+    const labels = Object.keys(tipoCounts);
+    const data = Object.values(tipoCounts);
+    const total = data.reduce((a, b) => a + b, 0);
+
+    const buffer = await this._generateDoughnutChart(labels, data, titulo);
+
+    let insight = 'No hay datos suficientes para identificar un patrón.';
+
+    if (labels.length && total) {
+      const maxIdx = data.indexOf(Math.max(...data));
+      const pctMax = this._pct(data[maxIdx], total);
+
+      insight = `"${labels[maxIdx]}" es el sacramento más registrado: ${data[maxIdx]} de ${total} casos (${pctMax}%).`;
+
+      if (labels.length > 1) {
+        const minIdx = data.indexOf(Math.min(...data));
+
+        if (minIdx !== maxIdx) {
+          insight += ` El menos frecuente es "${labels[minIdx]}", con ${data[minIdx]} registro${data[minIdx] === 1 ? '' : 's'}.`;
+        }
+      }
+    }
+
+    return {
+      titulo,
+      insight,
+      buffer,
+      displayWidth: this.chartDisplaySize.width,
+      displayHeight: this.chartDisplaySize.height
+    };
   }
 
   async _generateChartByParroquia(porParroquia = []) {
-    const labels = porParroquia.map(p => p.parroquia || p.nombre || 'Sin parroquia');
-    const data = porParroquia.map(p => Number(p.cantidad || p.total || 0));
+    const titulo = 'Parroquias con más sacramentos registrados';
 
-    return await this._generatePieOrBarChart(
-      labels,
-      data,
-      'Distribución de sacramentos por parroquia'
-    );
+    const entries = porParroquia.map(p => ({
+      label: p.parroquia || p.nombre || 'Sin parroquia',
+      value: Number(p.cantidad || p.total || 0)
+    }));
+
+    const { buffer, leader, total, count } = await this._generateRankingChart(entries, titulo);
+
+    const insight = total
+      ? `"${leader.label}" concentra ${leader.value} de ${total} sacramentos (${this._pct(leader.value, total)}%), la cifra más alta entre las ${count} parroquias con registros.`
+      : 'No hay datos suficientes para identificar un patrón.';
+
+    return {
+      titulo,
+      insight,
+      buffer,
+      displayWidth: this.chartDisplaySize.width,
+      displayHeight: this.chartDisplaySize.height
+    };
+  }
+
+  async _generateChartByUsuario(porUsuario = []) {
+    const titulo = 'Usuarios que más sacramentos han registrado';
+
+    const entries = porUsuario.map(u => ({
+      label: u.usuario || u.nombre || 'Sin usuario',
+      value: Number(u.cantidad || u.total || 0)
+    }));
+
+    const { buffer, leader, total, count } = await this._generateRankingChart(entries, titulo);
+
+    const insight = total
+      ? `"${leader.label}" ha registrado ${leader.value} sacramentos (${this._pct(leader.value, total)}% del total), más que cualquier otro de los ${count} usuarios registradores.`
+      : 'No hay datos suficientes para identificar un patrón.';
+
+    return {
+      titulo,
+      insight,
+      buffer,
+      displayWidth: this.chartDisplaySize.width,
+      displayHeight: this.chartDisplaySize.height
+    };
+  }
+
+  async _generateActivosInactivosChart(estadisticas = {}) {
+    const titulo = 'Estado de los registros';
+
+    const activos = Number(estadisticas.activos || 0);
+    const inactivos = Number(estadisticas.inactivos || 0);
+    const total = activos + inactivos;
+
+    if (!total) return null;
+
+    const pctActivos = this._pct(activos, total);
+    const pctInactivos = this._pct(inactivos, total);
+
+    const configuration = {
+      type: 'bar',
+      data: {
+        labels: ['Sacramentos'],
+        datasets: [
+          {
+            label: `Activos (${pctActivos}%)`,
+            data: [activos],
+            backgroundColor: '#66BB6A',
+            borderRadius: 6
+          },
+          {
+            label: `Inactivos (${pctInactivos}%)`,
+            data: [inactivos],
+            backgroundColor: '#EF5350',
+            borderRadius: 6
+          }
+        ]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: false,
+        layout: { padding: { top: 10, right: 30, bottom: 10, left: 10 } },
+        plugins: {
+          title: {
+            display: true,
+            text: titulo,
+            font: { size: 18, weight: 'bold' },
+            color: this.colors.textDark,
+            padding: { bottom: 4 }
+          },
+          subtitle: {
+            display: true,
+            text: `Total: ${total}`,
+            font: { size: 12, style: 'italic' },
+            color: this.colors.secondary,
+            padding: { bottom: 10 }
+          },
+          legend: {
+            display: true,
+            position: 'bottom',
+            labels: { usePointStyle: true, boxWidth: 8, font: { size: 12 } }
+          },
+          datalabels: {
+            color: '#fff',
+            font: { weight: 'bold', size: 13 },
+            formatter: (value) => (value > 0 ? value : '')
+          }
+        },
+        scales: {
+          x: { stacked: true, display: false },
+          y: { stacked: true, display: false }
+        }
+      }
+    };
+
+    const buffer = await this.bannerChartRenderer.renderToBuffer(configuration);
+
+    const insight = activos >= inactivos
+      ? `El ${pctActivos}% de los sacramentos registrados están activos; el ${pctInactivos}% restante figura como inactivo.`
+      : `Solo el ${pctActivos}% de los sacramentos registrados están activos: la mayoría (${pctInactivos}%) están inactivos, lo que puede requerir revisión.`;
+
+    return {
+      titulo,
+      insight,
+      buffer,
+      displayWidth: this.bannerDisplaySize.width,
+      displayHeight: this.bannerDisplaySize.height
+    };
+  }
+
+  async _generateRankingChart(entries = [], title = '') {
+    const sorted = entries
+      .filter(e => e.value > 0)
+      .sort((a, b) => b.value - a.value);
+
+    const topN = 7;
+    let display = sorted.slice(0, topN);
+    const rest = sorted.slice(topN);
+
+    if (rest.length) {
+      display = [...display, {
+        label: `Otras (${rest.length})`,
+        value: rest.reduce((s, e) => s + e.value, 0)
+      }];
+    }
+
+    const total = sorted.reduce((s, e) => s + e.value, 0);
+    const leader = sorted[0] || { label: 'Sin datos', value: 0 };
+
+    if (!display.length) {
+      display = [{ label: 'Sin datos', value: 1 }];
+    }
+
+    const labels = display.map(d => d.label);
+    const data = display.map(d => d.value);
+
+    const backgroundColors = display.map((d, idx) => {
+      if (idx === 0 && d.label === leader.label) return this.colors.primary;
+      if (d.label.startsWith('Otras')) return '#B0BEC5';
+      return '#90CAF9';
+    });
+
+    const configuration = {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Registros',
+          data,
+          backgroundColor: backgroundColors,
+          borderRadius: 6,
+          maxBarThickness: 26
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: false,
+        layout: { padding: { top: 10, right: 40, bottom: 10, left: 10 } },
+        plugins: {
+          title: {
+            display: true,
+            text: title,
+            font: { size: 18, weight: 'bold' },
+            color: this.colors.textDark,
+            padding: { bottom: 4 }
+          },
+          subtitle: {
+            display: true,
+            text: `Total: ${total}`,
+            font: { size: 12, style: 'italic' },
+            color: this.colors.secondary,
+            padding: { bottom: 14 }
+          },
+          legend: { display: false },
+          datalabels: {
+            color: this.colors.textDark,
+            anchor: 'end',
+            align: 'right',
+            font: { weight: 'bold', size: 11 },
+            formatter: (value) => value
+          }
+        },
+        scales: {
+          x: {
+            beginAtZero: true,
+            grid: { color: '#E0E0E0', borderDash: [4, 4] },
+            ticks: { precision: 0, font: { size: 10 } }
+          },
+          y: {
+            grid: { display: false },
+            ticks: { font: { size: 11 } }
+          }
+        }
+      }
+    };
+
+    const buffer = await this.chartRenderer.renderToBuffer(configuration);
+
+    return { buffer, leader, total, count: sorted.length };
   }
 
   async _generateChartByMonth(porMes = []) {
+    const titulo = 'Evolución temporal de sacramentos';
     const labels = porMes.map(m => m.periodo || m.mes || 'Sin periodo');
     const data = porMes.map(m => Number(m.cantidad || m.total || 0));
     const showLabels = data.length <= 12;
@@ -475,63 +743,93 @@ class PDFGenerator {
         plugins: {
           title: {
             display: true,
-            text: 'Evolución temporal de sacramentos',
-            font: { size: 20, weight: 'bold' },
+            text: titulo,
+            font: { size: 18, weight: 'bold' },
             color: this.colors.textDark,
-            padding: { bottom: 6 }
+            padding: { bottom: 4 }
           },
           subtitle: {
             display: true,
             text: `Total del periodo: ${data.reduce((a, b) => a + b, 0)}`,
-            font: { size: 13, style: 'italic' },
+            font: { size: 12, style: 'italic' },
             color: this.colors.secondary,
-            padding: { bottom: 20 }
+            padding: { bottom: 14 }
           },
           legend: {
             display: true,
             position: 'top',
-            labels: { usePointStyle: true, boxWidth: 8, font: { size: 13 } }
+            labels: { usePointStyle: true, boxWidth: 8, font: { size: 12 } }
           },
           datalabels: {
             display: showLabels,
             align: 'top',
             anchor: 'end',
             color: this.colors.textDark,
-            font: { size: 11, weight: 'bold' },
+            font: { size: 10, weight: 'bold' },
             formatter: (value) => value
           }
         },
         scales: {
           x: {
             grid: { display: false },
-            ticks: { font: { size: 12 } }
+            ticks: { font: { size: 11 } }
           },
           y: {
             beginAtZero: true,
             grid: { color: '#E0E0E0', borderDash: [4, 4] },
-            ticks: { precision: 0, font: { size: 12 } }
+            ticks: { precision: 0, font: { size: 11 } }
           }
         }
       }
     };
 
-    return await this.chartRenderer.renderToBuffer(configuration);
+    const buffer = await this.chartRenderer.renderToBuffer(configuration);
+
+    let insight = 'No hay datos suficientes para identificar una tendencia.';
+
+    if (data.length) {
+      const maxIdx = data.indexOf(Math.max(...data));
+      const minIdx = data.indexOf(Math.min(...data));
+      const mid = Math.floor(data.length / 2) || 1;
+      const firstHalf = data.slice(0, mid);
+      const secondHalf = data.slice(mid);
+      const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
+      const secondAvg = secondHalf.length
+        ? secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length
+        : firstAvg;
+
+      let tendencia = 'un comportamiento relativamente estable';
+
+      if (secondAvg > firstAvg * 1.15) tendencia = 'una tendencia de crecimiento';
+      else if (secondAvg < firstAvg * 0.85) tendencia = 'una tendencia a la baja';
+
+      insight = `El periodo con más actividad fue ${labels[maxIdx]} (${data[maxIdx]} registros)`;
+      insight += minIdx !== maxIdx
+        ? `, mientras que ${labels[minIdx]} tuvo la menor (${data[minIdx]}).`
+        : '.';
+      insight += ` En conjunto, se observa ${tendencia} a lo largo del periodo.`;
+    }
+
+    return {
+      titulo,
+      insight,
+      buffer,
+      displayWidth: this.chartDisplaySize.width,
+      displayHeight: this.chartDisplaySize.height
+    };
   }
 
-  async _generatePieOrBarChart(labels = [], data = [], title = '') {
+  async _generateDoughnutChart(labels = [], data = [], title = '') {
     if (!labels.length || !data.length) {
       labels = ['Sin datos'];
       data = [1];
     }
 
-    const isSingle = labels.length === 1;
     const total = data.reduce((a, b) => a + b, 0);
-    const backgroundColors = isSingle
-      ? [this.chartPalette[0]]
-      : labels.map((_, idx) => this.chartPalette[idx % this.chartPalette.length]);
+    const backgroundColors = labels.map((_, idx) => this.chartPalette[idx % this.chartPalette.length]);
 
     const configuration = {
-      type: isSingle ? 'bar' : 'doughnut',
+      type: 'doughnut',
       data: {
         labels,
         datasets: [{
@@ -540,95 +838,113 @@ class PDFGenerator {
           backgroundColor: backgroundColors,
           hoverBackgroundColor: backgroundColors,
           borderColor: '#fff',
-          borderWidth: isSingle ? 0 : 3,
-          borderRadius: isSingle ? 8 : 0,
-          hoverOffset: isSingle ? 0 : 10
+          borderWidth: 3,
+          hoverOffset: 10
         }]
       },
       options: {
         responsive: false,
-        cutout: isSingle ? undefined : '58%',
+        cutout: '58%',
         layout: { padding: { top: 10, right: 20, bottom: 10, left: 20 } },
         plugins: {
           title: {
             display: true,
             text: title,
-            font: { size: 20, weight: 'bold' },
+            font: { size: 18, weight: 'bold' },
             color: this.colors.textDark,
-            padding: { bottom: 6 }
+            padding: { bottom: 4 }
           },
           subtitle: {
             display: true,
             text: `Total: ${total}`,
-            font: { size: 13, style: 'italic' },
+            font: { size: 12, style: 'italic' },
             color: this.colors.secondary,
-            padding: { bottom: 20 }
+            padding: { bottom: 14 }
           },
           legend: {
-            display: !isSingle,
+            display: labels.length > 1,
             position: 'right',
             labels: {
-              padding: 16,
+              padding: 14,
               usePointStyle: true,
               boxWidth: 8,
-              font: { size: 13 }
+              font: { size: 12 }
             }
           },
           datalabels: {
-            color: isSingle ? this.colors.textDark : '#fff',
-            anchor: isSingle ? 'end' : 'center',
-            align: isSingle ? 'top' : 'center',
-            font: { weight: 'bold', size: 13 },
+            color: '#fff',
+            anchor: 'center',
+            align: 'center',
+            font: { weight: 'bold', size: 12 },
             formatter: (value) => {
               if (!total) return value;
-              if (isSingle) return value;
               const pct = (value / total) * 100;
               return pct >= 5 ? `${pct.toFixed(1)}%` : '';
             }
           }
-        },
-        scales: isSingle ? {
-          y: {
-            beginAtZero: true,
-            max: Math.max(...data) + 1,
-            grid: { color: '#E0E0E0', borderDash: [4, 4] }
-          },
-          x: {
-            grid: { display: false }
-          }
-        } : {}
+        }
       }
     };
 
     return await this.chartRenderer.renderToBuffer(configuration);
   }
 
-  _addChartToPage(doc, chartImage) {
-    const chartWidth = 500;
-    const chartHeight = 300;
-    const padding = 12;
-    const x = (doc.page.width - chartWidth) / 2;
-    const y = doc.y + 20;
+  _estimateChartBlockHeight(block) {
+    // Calibrado contra mediciones reales de doc.y antes/después de dibujar
+    // cada tipo de bloque: título + tarjeta + espaciados fijos rondan 37pt,
+    // y cada ~105 caracteres de insight agregan una línea (~11pt) más.
+    const chartCardHeight = block.displayHeight + 24;
+    const insightLines = block.insight ? Math.max(1, Math.ceil(block.insight.length / 105)) : 0;
+
+    return chartCardHeight + 37 + insightLines * 11;
+  }
+
+  _addChartBlockToPage(doc, block) {
+    const { titulo, insight, buffer, displayWidth, displayHeight } = block;
+    const padding = 10;
+
+    doc.fontSize(13)
+      .font(this.fonts.bold)
+      .fillColor(this.colors.primary)
+      .text(titulo, 50, doc.y, { width: doc.page.width - 100 });
+
+    doc.moveDown(0.5);
+
+    const chartX = (doc.page.width - displayWidth) / 2;
+    const chartY = doc.y;
 
     try {
-      doc.roundedRect(x - padding, y - padding, chartWidth + padding * 2, chartHeight + padding * 2, 8)
+      doc.roundedRect(chartX - padding, chartY - padding, displayWidth + padding * 2, displayHeight + padding * 2, 8)
         .fillColor('#FAFAFA')
         .fill();
 
-      doc.roundedRect(x - padding, y - padding, chartWidth + padding * 2, chartHeight + padding * 2, 8)
+      doc.roundedRect(chartX - padding, chartY - padding, displayWidth + padding * 2, displayHeight + padding * 2, 8)
         .strokeColor(this.colors.light)
         .lineWidth(1)
         .stroke();
 
-      doc.image(chartImage, x, y, {
-        width: chartWidth,
-        height: chartHeight
+      doc.image(buffer, chartX, chartY, {
+        width: displayWidth,
+        height: displayHeight
       });
-
-      doc.moveDown(16);
     } catch (err) {
       console.error('Error agregando imagen de gráfica:', err.message);
     }
+
+    doc.y = chartY + displayHeight + padding + 12;
+
+    if (insight) {
+      doc.fontSize(9.5)
+        .font(this.fonts.bold)
+        .fillColor(this.colors.textDark)
+        .text('Lo más destacado: ', 55, doc.y, { continued: true, width: doc.page.width - 110 });
+
+      doc.font(this.fonts.italic)
+        .fillColor(this.colors.secondary)
+        .text(insight, { width: doc.page.width - 110 });
+    }
+
+    doc.moveDown(1.4);
   }
 
   _addTable(doc, sacramentos = [], fields = [], onNewPage) {
